@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <FastLED.h>
 #include "symboles.h"
+#include <string>
+#include <vector>
+#include <stdlib.h>
 
 #define LED_PIN 13
 #define BRIGHTNESS 2
@@ -58,7 +61,7 @@ int echoPinY = 5; // Echo
 
 long duration, cm;
 float inches, feet;
-unsigned int annimationCount = 0;
+static unsigned int annimationCount = 0;
 
 CRGB leftBuffer[MATRIX_HEIGHT];
 
@@ -76,8 +79,9 @@ struct Coordinate
 
 //-----------------------------------------------------------------------------
 // Forward declarations
-void showSymbol(Symbols::SYMBOLS symbol);
-void dumpLeds(bool matrix);
+void ShowSymbol(Symbols::SYMBOLS symbol);
+void DumpLeds(bool matrix);
+void ReverseColumns();
 //-----------------------------------------------------------------------------
 
 void setup()
@@ -100,7 +104,7 @@ void setup()
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(BRIGHTNESS);
 
-  showSymbol(Symbols::SYMBOLS::ARROW_LEFT);
+  ShowSymbol(Symbols::SYMBOLS::ARROW_LEFT);
 };
 
 int ColorToIndex(CRGB hex)
@@ -121,25 +125,38 @@ int ColorToIndex(CRGB hex)
 }
 
 //------------------------------------------------------------------------------
-void dumpLeds(bool matrix)
+void DumpLeds(bool matrix)
 {
-  Serial.println("0,1,2,3,4,5,6,7,8,9,A,B,C,D,E,F");
+  Serial.println("    0,1,2,3,4,5,6,7,8,9,A,B,C,D,E,F");
+  Serial.println("    -------------------------------");
   for (int x = 0; x < NUM_LEDS; ++x)
   {
+    if (x == 0)
+    {
+      Serial.print("00| ");
+    }
     if (x > 0)
     {
       Serial.print(",");
       if (!(x % MATRIX_WIDTH))
+      {
         Serial.println("");
+        int row = x / MATRIX_HEIGHT;
+        std::string rowP = row < 10 ? "0" + std::to_string(row) : std::to_string(row);
+        rowP += "| ";
+        Serial.print(rowP.c_str());
+      }
     }
     Serial.print(ColorToIndex(leds[x]));
   }
+  Serial.println();
+  Serial.println("    -------------------------------");
+  Serial.println("    0,1,2,3,4,5,6,7,8,9,A,B,C,D,E,F");
   Serial.println();
 }
 
 const char *toString(POSITION position)
 {
-  char pos[6];
   switch (position)
   {
   case NONE:
@@ -198,7 +215,7 @@ void DoMeasure(Sensor *sensor)
   sensor->distanceCm = (pulseIn(sensor->echoPin, HIGH) / 2) / CM_CONVERSION;
 }
 
-void clearMatrix()
+void CearMatrix()
 {
   for (int i = 0; i < NUM_LEDS; ++i)
   {
@@ -207,7 +224,7 @@ void clearMatrix()
   FastLED.show();
 }
 
-int toLinearPosition(int x, int y)
+int ToLinearPosition(int x, int y)
 {
   if (!!(y % 2))
   {
@@ -219,7 +236,7 @@ int toLinearPosition(int x, int y)
   }
 }
 
-Coordinate toMatrixPosition(int idx)
+Coordinate ToMatrixPosition(int idx)
 {
   int y = (int)(idx / 16);
   int x = idx % MATRIX_WIDTH;
@@ -232,16 +249,28 @@ Coordinate toMatrixPosition(int idx)
   return Coordinate(x, y);
 }
 
-void showSymbol(Symbols::SYMBOLS symbol)
+void ShowSymbol(Symbols::SYMBOLS symbol)
 {
-  auto color = CRGB::Green;
-  clearMatrix();
+  CearMatrix();
 
   auto selectedSymbol = Symbols::SYMBOL_MATRIX[(int)Symbols::SYMBOLS::ARROW_LEFT];
 
   for (int x = 0; x < NUM_LEDS; ++x)
   {
-    leds[x] = COLORS[selectedSymbol[x]];
+    int row = x / MATRIX_HEIGHT;
+    if (row % 2)
+    {
+      // Odd row
+      // We need to reverse the position within the row for every odd row because
+      // or the layout of the matrix
+      auto column = x - (row * MATRIX_WIDTH);
+      auto reversed = (((row - 1) * MATRIX_WIDTH) + MATRIX_WIDTH - column + MATRIX_WIDTH - 1);
+      leds[reversed] = COLORS[selectedSymbol[x]];
+    }
+    else
+    {
+      leds[x] = COLORS[selectedSymbol[x]];
+    }
   }
 
   FastLED.show();
@@ -279,10 +308,10 @@ void scrollUp()
       leds[i - MATRIX_WIDTH] = leds[i];
     }
   }
-  dumpLeds(true);
+  DumpLeds(true);
 }
 
-void scrollLeft()
+void ScrollLeft()
 {
   CRGB leftBuffer[MATRIX_WIDTH];
 
@@ -298,12 +327,36 @@ void scrollLeft()
     }
   }
 
+  // Append the row that was moved off the left of the matrix
   for (int i = 0; i < MATRIX_WIDTH; ++i)
   {
     leds[NUM_LEDS - MATRIX_WIDTH + i] = leftBuffer[i];
   }
 
+  ReverseColumns();
+
   FastLED.show();
+}
+
+void ReverseColumns()
+{
+  for (int i = 0; i < NUM_LEDS; i += MATRIX_WIDTH)
+  {
+    // Go through each column
+    CRGB columnBuffer[MATRIX_WIDTH];
+
+    for (int j = 0; j < MATRIX_WIDTH; ++j)
+    {
+      // Read the column into a buffer
+      columnBuffer[j] = leds[i + j];
+    }
+
+    // Re-add the elements in reverse order
+    for (int k = MATRIX_WIDTH - 1, count = 0; k >= 0; --k, ++count)
+    {
+      leds[i + k] = columnBuffer[count];
+    }
+  }
 }
 
 void TestPattern()
@@ -325,14 +378,7 @@ void *thread(void *ptr)
 }
 void loop()
 {
-  if (++annimationCount > 2)
-  {
-    Serial.println("BEFORE");
-    dumpLeds(true);
-    scrollLeft();
-    Serial.println("AFTER");
-    dumpLeds(true);
-  }
+  ScrollLeft();
 
   digitalWrite(LED_BUILTIN, HIGH); // turn the LED on (HIGH is the voltage level)
 
@@ -345,5 +391,5 @@ void loop()
   SetParkLight(IsCarPresent());
   digitalWrite(LED_BUILTIN, LOW); // turn the LED off by making the voltage LOW
 
-  delay(1000);
+  delay(10);
 }
