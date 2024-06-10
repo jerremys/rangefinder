@@ -4,6 +4,14 @@
 #include <string>
 #include <vector>
 #include <stdlib.h>
+#include <TaskScheduler.h>
+
+// Callback methods prototypes
+void AnimateCallback();
+
+// Tasks
+Task animateTask(50, TASK_FOREVER, &AnimateCallback);
+Scheduler runner;
 
 #define LED_PIN 13
 #define BRIGHTNESS 2
@@ -19,6 +27,10 @@
 #define NUMBER_OF_SENSORS 2
 
 #define PARK_MARGIN 30
+#define _TASK_SLEEP_ON_IDLE_RUN
+
+const int sleepMs = 50;
+Task taskAnimate;
 
 CRGB leds[NUM_LEDS];
 
@@ -26,6 +38,8 @@ enum POSITION
 {
   NONE,
   FRONT,
+  RIGHT,
+  BACK,
   LEFT
 };
 
@@ -61,7 +75,6 @@ int echoPinY = 5; // Echo
 
 long duration, cm;
 float inches, feet;
-static unsigned int annimationCount = 0;
 
 CRGB leftBuffer[MATRIX_HEIGHT];
 
@@ -82,6 +95,14 @@ struct Coordinate
 void ShowSymbol(Symbols::SYMBOLS symbol);
 void DumpLeds(bool matrix);
 void ReverseColumns();
+void ScrollUp();
+void ScrollRight();
+void ScrollLeft();
+void AnimateCallback();
+void Scroll(POSITION position);
+void DoMeasure(Sensor *sensor);
+void SetParkLight(bool lightOn);
+bool IsCarPresent();
 //-----------------------------------------------------------------------------
 
 void setup()
@@ -104,8 +125,33 @@ void setup()
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(BRIGHTNESS);
 
-  ShowSymbol(Symbols::SYMBOLS::ARROW_LEFT);
+  ShowSymbol(Symbols::SYMBOLS::ARROW_RIGHT);
+
+  runner.init();
+  runner.addTask(animateTask);
+  animateTask.enable();
 };
+
+void loop()
+{
+  runner.execute();
+
+  digitalWrite(LED_BUILTIN, HIGH); // turn the LED on (HIGH is the voltage level)
+
+  for (int i = 0; i < NUMBER_OF_SENSORS; ++i)
+  {
+    DoMeasure(&allSensors[i]);
+    // PrintDistance(allSensors[i]);
+  }
+
+  SetParkLight(IsCarPresent());
+  digitalWrite(LED_BUILTIN, LOW); // turn the LED off by making the voltage LOW
+}
+
+void AnimateCallback()
+{
+  Scroll(RIGHT);
+}
 
 int ColorToIndex(CRGB hex)
 {
@@ -253,7 +299,7 @@ void ShowSymbol(Symbols::SYMBOLS symbol)
 {
   CearMatrix();
 
-  auto selectedSymbol = Symbols::SYMBOL_MATRIX[(int)Symbols::SYMBOLS::ARROW_LEFT];
+  auto selectedSymbol = Symbols::SYMBOL_MATRIX[(int)symbol];
 
   for (int x = 0; x < NUM_LEDS; ++x)
   {
@@ -295,7 +341,28 @@ void PrintDistance(Sensor sensor)
   }
 }
 
-void scrollUp()
+void Scroll(POSITION position)
+{
+  switch (position)
+  {
+  case FRONT:
+    ScrollUp();
+    break;
+  case RIGHT:
+    ScrollRight();
+    break;
+  case BACK:
+    break;
+  case LEFT:
+    ScrollLeft();
+    break;
+  }
+}
+
+void Flash()
+{
+}
+void ScrollUp()
 {
   for (int i = 0; i <= NUM_LEDS - 1; i++)
   {
@@ -313,13 +380,13 @@ void scrollUp()
 
 void ScrollLeft()
 {
-  CRGB leftBuffer[MATRIX_WIDTH];
+  CRGB buffer[MATRIX_WIDTH];
 
   for (int i = 0; i <= NUM_LEDS - 1; i++)
   {
     if (i < MATRIX_WIDTH)
     {
-      leftBuffer[i] = leds[i];
+      buffer[i] = leds[i];
     }
     else
     {
@@ -327,10 +394,40 @@ void ScrollLeft()
     }
   }
 
-  // Append the row that was moved off the left of the matrix
+  // Append the row that was moved off the left of the matrix to the right-most column
   for (int i = 0; i < MATRIX_WIDTH; ++i)
   {
-    leds[NUM_LEDS - MATRIX_WIDTH + i] = leftBuffer[i];
+    leds[NUM_LEDS - MATRIX_WIDTH + i] = buffer[i];
+  }
+
+  ReverseColumns();
+
+  FastLED.show();
+}
+
+void ScrollRight()
+{
+  CRGB buffer[MATRIX_WIDTH];
+
+  int lastColumn = NUM_LEDS - MATRIX_WIDTH - 1;
+  int bufferCount = 0;
+
+  for (int i = NUM_LEDS - 1; i >= 0 - 1; --i)
+  {
+    if (i > lastColumn)
+    {
+      buffer[bufferCount++] = leds[i];
+    }
+    else
+    {
+      leds[i + MATRIX_WIDTH] = leds[i];
+    }
+  }
+
+  // Prepend the row that was moved off the right of the matrix to the left-most column
+  for (int i = 0; i < MATRIX_WIDTH; ++i)
+  {
+    leds[i] = buffer[i];
   }
 
   ReverseColumns();
@@ -366,30 +463,6 @@ void TestPattern()
   {
     leds[ct++] = CRGB::Red;
     FastLED.show();
-    delay(100);
+    delay(1000);
   }
-}
-
-void *thread(void *ptr)
-{
-  int type = (int)ptr;
-  fprintf(stderr, "Thread - %d\n", type);
-  return ptr;
-}
-void loop()
-{
-  ScrollLeft();
-
-  digitalWrite(LED_BUILTIN, HIGH); // turn the LED on (HIGH is the voltage level)
-
-  for (int i = 0; i < NUMBER_OF_SENSORS; ++i)
-  {
-    DoMeasure(&allSensors[i]);
-    PrintDistance(allSensors[i]);
-  }
-
-  SetParkLight(IsCarPresent());
-  digitalWrite(LED_BUILTIN, LOW); // turn the LED off by making the voltage LOW
-
-  delay(10);
 }
