@@ -1,17 +1,9 @@
+#include "symboles.h"
+
 #include <Arduino.h>
 #include <FastLED.h>
-#include "symboles.h"
 #include <string>
-#include <vector>
-#include <stdlib.h>
 #include <TaskScheduler.h>
-
-// Callback methods prototypes
-void AnimateCallback();
-
-// Tasks
-Task animateTask(50, TASK_FOREVER, &AnimateCallback);
-Scheduler runner;
 
 #define LED_PIN 13
 #define BRIGHTNESS 2
@@ -28,13 +20,35 @@ Scheduler runner;
 
 #define PARK_MARGIN 30
 #define _TASK_SLEEP_ON_IDLE_RUN
+#define AVG_SAMPLE_SIZE 10
 
-const int sleepMs = 50;
 Task taskAnimate;
 
 CRGB leds[NUM_LEDS];
 
-enum POSITION
+enum class ANIMATION_RATE
+{
+  NONE = 0,
+  EXTRA_FAST = 10,
+  FAST = 30,
+  MEDIUM = 50,
+  SLOW = 70,
+  EXTRA_SLOW = 90,
+  LAST_ELEMENT
+};
+
+enum class DISTANCE
+{
+  NONE = 0,
+  CLOSE = 10,
+  NEAR = 30,
+  DISTANT = 50,
+  FAR = 70,
+  REMOTE = 90,
+  LAST_ELEMENT
+};
+
+enum class POSITION
 {
   NONE,
   FRONT,
@@ -43,14 +57,64 @@ enum POSITION
   LEFT
 };
 
-struct Sensor
+class Sensor
 {
+public:
   POSITION position;
   int triggerPin;
   int echoPin;
   float distanceCm;
+  float distanceCmAvg;
   int parkDistance;
   int parkMaxDistance;
+  int samples[AVG_SAMPLE_SIZE];
+  unsigned short sampleIndex = 0;
+  int endCm;
+
+  DISTANCE GetDistance()
+  {
+    if (!distanceCmAvg)
+      return DISTANCE::NONE;
+
+    int distancePct = distanceCmAvg / endCm;
+
+    if (distancePct <= (int)DISTANCE::NONE)
+      return DISTANCE::NONE;
+    if (distancePct <= (int)DISTANCE::CLOSE)
+      return DISTANCE::CLOSE;
+    if (distancePct <= (int)DISTANCE::NEAR)
+      return DISTANCE::NEAR;
+    if (distancePct <= (int)DISTANCE::DISTANT)
+      return DISTANCE::DISTANT;
+    if (distancePct <= (int)DISTANCE::FAR)
+      return DISTANCE::FAR;
+    if (distancePct <= (int)DISTANCE::REMOTE)
+      return DISTANCE::REMOTE;
+
+    return DISTANCE::NONE;
+  }
+
+  ANIMATION_RATE GetAnimationRate()
+  {
+    DISTANCE distance = GetDistance();
+
+    switch (distance)
+    {
+    case DISTANCE::CLOSE:
+      return ANIMATION_RATE::EXTRA_FAST;
+    case DISTANCE::NEAR:
+      return ANIMATION_RATE::FAST;
+    case DISTANCE::DISTANT:
+      return ANIMATION_RATE::MEDIUM;
+    case DISTANCE::FAR:
+      return ANIMATION_RATE::SLOW;
+    case DISTANCE::REMOTE:
+      return ANIMATION_RATE::EXTRA_SLOW;
+    default:
+      return ANIMATION_RATE::NONE;
+    }
+    return ANIMATION_RATE::NONE;
+  }
 };
 
 const int COLORS[] = {
@@ -64,14 +128,39 @@ const int COLORS[] = {
 };
 
 Sensor allSensors[NUMBER_OF_SENSORS] = {
-    {.position = FRONT, .triggerPin = 14, .echoPin = 12, .distanceCm = 0, .parkDistance = 90, .parkMaxDistance = 90 + PARK_MARGIN},
-    {.position = LEFT, .triggerPin = 4, .echoPin = 5, .distanceCm = 0, .parkDistance = 90, .parkMaxDistance = 90 + PARK_MARGIN}};
+    {.position = POSITION::FRONT, .triggerPin = 14, .echoPin = 12, .distanceCm = 0, .parkDistance = 90, .parkMaxDistance = 90 + PARK_MARGIN, .endCm = 550},
+    {.position = POSITION::LEFT, .triggerPin = 4, .echoPin = 5, .distanceCm = 0, .parkDistance = 90, .parkMaxDistance = 90 + PARK_MARGIN, .endCm = 350}};
 
 int trigPinX = 14; // Trigger
 int echoPinX = 12; // Echo
 
 int trigPinY = 4; // Trigger
 int echoPinY = 5; // Echo
+
+Symbols::SYMBOLS currentSymbol;
+ANIMATION_RATE currentAnimation;
+
+//-----------------------------------------------------------------------------
+// Forward declarations
+void AnimateCallback();
+void SensorCallback();
+void DoMeasure(Sensor *sensor);
+void DumpLeds(bool matrix);
+bool IsCarPresent();
+void ReverseColumns();
+void ScrollUp();
+void ScrollRight();
+void ScrollLeft();
+void Scroll(POSITION position);
+void SetParkLight(bool lightOn);
+void ShowSymbol(Symbols::SYMBOLS symbol);
+void PrintDistance(Sensor *sensor);
+//-----------------------------------------------------------------------------
+
+// Tasks
+Task animateTask(50, TASK_FOREVER, &AnimateCallback);
+Task sensorTask(20, TASK_FOREVER, &SensorCallback);
+Scheduler runner;
 
 long duration, cm;
 float inches, feet;
@@ -89,21 +178,6 @@ struct Coordinate
     y = yTmp;
   }
 };
-
-//-----------------------------------------------------------------------------
-// Forward declarations
-void ShowSymbol(Symbols::SYMBOLS symbol);
-void DumpLeds(bool matrix);
-void ReverseColumns();
-void ScrollUp();
-void ScrollRight();
-void ScrollLeft();
-void AnimateCallback();
-void Scroll(POSITION position);
-void DoMeasure(Sensor *sensor);
-void SetParkLight(bool lightOn);
-bool IsCarPresent();
-//-----------------------------------------------------------------------------
 
 void setup()
 {
@@ -129,28 +203,106 @@ void setup()
 
   runner.init();
   runner.addTask(animateTask);
+  runner.addTask(sensorTask);
+
   animateTask.enable();
+  sensorTask.enable();
 };
+
+enum class DISTANCE
+{
+  NONE = 0,
+  CLOSE = 10,
+  NEAR = 30,
+  DISTANT = 50,
+  FAR = 70,
+  REMOTE = 90,
+  LAST_ELEMENT
+};
+
+Sensor *GetSensor(POSITION position)
+{
+  for (int i = 0; i < NUMBER_OF_SENSORS; ++i)
+  {
+    if (allSensors[i].position == position)
+      return &allSensors[i];
+  }
+}
+
+void SetAnimation()
+{
+  auto *leftSensor = GetSensor(POSITION::LEFT);
+  auto *frontSensor = GetSensor(POSITION::FRONT);
+
+  auto symbol = Symbols::SYMBOLS::NONE;
+  auto deviation = 0;
+  ANIMATION_RATE rate;
+  DISTANCE distance;
+
+  if (leftSensor->distanceCmAvg < leftSensor->endCm)
+  {
+    // Within measuring distance
+    if (leftSensor->distanceCmAvg < leftSensor->parkDistance)
+    {
+      // Too far left
+      symbol = Symbols::SYMBOLS::ARROW_RIGHT;
+      deviation = leftSensor->parkDistance - leftSensor->distanceCmAvg;
+    }
+    else if (leftSensor->distanceCmAvg > leftSensor->parkDistance)
+    {
+      // Too far right
+      symbol = Symbols::SYMBOLS::ARROW_LEFT;
+      deviation = leftSensor->distanceCmAvg > leftSensor->parkDistance;
+    }
+  }
+
+  if (frontSensor->distanceCmAvg < leftSensor->endCm)
+  {
+    deviation = frontSensor->distanceCmAvg - frontSensor->parkDistance;
+    int distancePct = frontSensor->distanceCmAvg / frontSensor->endCm;
+    auto distance = frontSensor->GetDistance();
+    rate = frontSensor->GetAnimationRate();
+
+    if (symbol != Symbols::SYMBOLS::NONE && distance == DISTANCE::CLOSE)
+    {
+      symbol = Symbols::SYMBOLS::CHECK;
+    }
+    else if (symbol == Symbols::SYMBOLS::NONE)
+    {
+      symbol = Symbols::SYMBOLS::ARROW_UP;
+    }
+  }
+
+  currentSymbol = symbol;
+  currentAnimation = rate;
+}
 
 void loop()
 {
   runner.execute();
 
+  // The distance measured in a task
+  SetAnimation();
+
   digitalWrite(LED_BUILTIN, HIGH); // turn the LED on (HIGH is the voltage level)
-
-  for (int i = 0; i < NUMBER_OF_SENSORS; ++i)
-  {
-    DoMeasure(&allSensors[i]);
-    // PrintDistance(allSensors[i]);
-  }
-
   SetParkLight(IsCarPresent());
   digitalWrite(LED_BUILTIN, LOW); // turn the LED off by making the voltage LOW
+
+  //    animateTask.setInterval(animateTask.getInterval() + 50);
 }
 
 void AnimateCallback()
 {
-  Scroll(RIGHT);
+  Scroll(POSITION::RIGHT);
+}
+
+void SensorCallback()
+{
+  for (int i = 0; i < NUMBER_OF_SENSORS; ++i)
+  {
+    DoMeasure(&allSensors[i]);
+    // PrintDistance(&allSensors[i]);
+  }
 }
 
 int ColorToIndex(CRGB hex)
@@ -205,11 +357,11 @@ const char *toString(POSITION position)
 {
   switch (position)
   {
-  case NONE:
+  case POSITION::NONE:
     return "None";
-  case FRONT:
+  case POSITION::FRONT:
     return "Front";
-  case LEFT:
+  case POSITION::LEFT:
     return "Left";
   default:
     return "Error";
@@ -244,6 +396,44 @@ void SetParkLight(bool lightOn)
   digitalWrite(INDICATOR_PIN, lightOn ? HIGH : LOW);
 }
 
+int avgCount = 0;
+
+void PrintAvg(Sensor *sensor)
+{
+  Serial.print("AverageDistance: [[");
+  for (int i = 0; i < AVG_SAMPLE_SIZE; ++i)
+  {
+    if (i)
+      Serial.print(", ");
+    Serial.print(sensor->samples[i]);
+  }
+
+  Serial.print("], total=");
+  Serial.print(sensor->sampleIndex);
+  Serial.print(", avg=");
+  Serial.print(sensor->distanceCmAvg);
+  Serial.println("]");
+}
+
+float AverageDistance(Sensor *sensor)
+{
+  float total = 0.0;
+  short count = 0;
+
+  for (int i = 0; i < AVG_SAMPLE_SIZE; ++i)
+  {
+    if (sensor->samples[i])
+    {
+      total += sensor->samples[i];
+      ++count;
+    }
+  }
+
+  sensor->distanceCmAvg = count ? total / (float)count : 0.0f;
+
+  return sensor->distanceCmAvg;
+}
+
 void DoMeasure(Sensor *sensor)
 {
   // The sensor is triggered by a HIGH pulse of 10 or more microseconds.
@@ -259,6 +449,12 @@ void DoMeasure(Sensor *sensor)
   // of the ping to the reception of its echo off of an object.
   pinMode(sensor->echoPin, INPUT);
   sensor->distanceCm = (pulseIn(sensor->echoPin, HIGH) / 2) / CM_CONVERSION;
+
+  sensor->samples[sensor->sampleIndex] = sensor->distanceCm;
+  sensor->distanceCmAvg = AverageDistance(sensor);
+
+  if (++sensor->sampleIndex >= AVG_SAMPLE_SIZE)
+    sensor->sampleIndex = 0;
 }
 
 void CearMatrix()
@@ -322,17 +518,19 @@ void ShowSymbol(Symbols::SYMBOLS symbol)
   FastLED.show();
 }
 
-void PrintDistance(Sensor sensor)
+void PrintDistance(Sensor *sensor)
 {
-  auto inches = sensor.distanceCm / 2.54;
+  auto inches = sensor->distanceCm / 2.54;
   feet = inches / 12;
 
   if (true)
   {
     Serial.print("[");
-    Serial.print(toString(sensor.position));
+    Serial.print(toString(sensor->position));
     Serial.print("]=[");
-    Serial.print(sensor.distanceCm);
+    Serial.print(sensor->distanceCmAvg);
+    Serial.print("cm avg, ");
+    Serial.print(sensor->distanceCm);
     Serial.print("cm, ");
     Serial.print(inches);
     Serial.print("in, ");
@@ -345,15 +543,15 @@ void Scroll(POSITION position)
 {
   switch (position)
   {
-  case FRONT:
+  case POSITION::FRONT:
     ScrollUp();
     break;
-  case RIGHT:
+  case POSITION::RIGHT:
     ScrollRight();
     break;
-  case BACK:
+  case POSITION::BACK:
     break;
-  case LEFT:
+  case POSITION::LEFT:
     ScrollLeft();
     break;
   }

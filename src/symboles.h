@@ -7,12 +7,13 @@ class Symbols
 public:
   enum SYMBOLS
   {
-    ARROW_LEFT,
-    ARROW_RIGHT,
-    ARROW_DOWN,
-    ARROW_UP,
-    CHECK,
-    CIRCLE
+    NONE = -1,
+    ARROW_LEFT = 0,
+    ARROW_RIGHT = 1,
+    ARROW_DOWN = 2,
+    ARROW_UP = 3,
+    CHECK = 4,
+    CIRCLE = 5
   };
 
   // Each subarray is a column. To visualize the output,rotate the matrix 90deg anti-clockwise
